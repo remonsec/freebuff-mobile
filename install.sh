@@ -6,18 +6,15 @@
 # License : MIT
 #
 # Freebuff is the free, ad-supported AI coding agent from Codebuff.
-#   • Uses open-source models: DeepSeek, GLM, MiMo, Solar, and more
+#   • Free models: DeepSeek, GLM, MiMo, Solar, and more — no API key needed
 #   • Works with any editor: VS Code, Cursor, Neovim, etc.
 #
-# Termux-specific issues (all handled automatically by this script):
-#   1. npm reports os='android' but freebuff expects 'linux'
-#      → fixed with: npm install -g freebuff --force
-#   2. The downloaded freebuff binary is a glibc ELF (not bionic)
-#      → requires Termux's glibc layer: pkg install glibc
-#      → run via: /usr/glibc/lib/ld-linux-aarch64.so.1 --library-path ...
-#   3. Wrapper at $PREFIX/bin/freebuff handles both of the above transparently
-#
-# Install: bash install.sh
+# Architecture notes:
+#   Freebuff's linux-arm64 binary is compiled for glibc. Termux uses Android's
+#   bionic libc, so the Termux glibc layer (pkg install glibc) is required to
+#   provide the dynamic linker (ld-linux-aarch64.so.1). npm also reports
+#   os='android'; --force bypasses this platform check safely since the
+#   linux-arm64 binary runs correctly via the glibc layer.
 # =============================================================================
 
 set -euo pipefail
@@ -51,7 +48,6 @@ echo ""
 [[ "$(uname -m)" == "aarch64" ]] || warn "Not aarch64 — proceeding anyway."
 [[ -d "/data/data/com.termux" ]] || die "Must be run inside Termux."
 
-# Termux prefix
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 GLIBC_LINKER="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
 GLIBC_LIBDIR="$PREFIX/glibc/lib"
@@ -59,7 +55,7 @@ FREEBUFF_BINARY="$HOME/.config/manicode/freebuff"
 
 # ── Step 1: Update Termux packages ───────────────────────────────────────────
 step "Step 1/5 — Updating Termux packages..."
-pkg update -y -o Dpkg::Options::="--force-confnew" 2>/dev/null || warn "pkg update had warnings (non-fatal)"
+pkg update -y -o Dpkg::Options::="--force-confnew" 2>/dev/null || warn "pkg update had warnings (non-fatal)."
 ok "Package list updated."
 
 # ── Step 2: Install Node.js ──────────────────────────────────────────────────
@@ -67,13 +63,13 @@ step "Step 2/5 — Checking Node.js (≥16 required)..."
 if command -v node >/dev/null 2>&1; then
   NODE_VER=$(node --version)
   if node -e "process.exit(parseInt(process.version.slice(1)) < 16 ? 1 : 0)" 2>/dev/null; then
-    ok "Node.js $NODE_VER ✓"
+    ok "Node.js $NODE_VER"
   else
-    warn "Node.js $NODE_VER too old. Upgrading..."
+    warn "Node.js $NODE_VER is too old. Upgrading..."
     pkg install -y nodejs-lts 2>/dev/null || pkg install -y nodejs 2>/dev/null
   fi
 else
-  info "Node.js not found. Installing..."
+  info "Installing Node.js..."
   pkg install -y nodejs 2>/dev/null
   ok "Node.js $(node --version) installed."
 fi
@@ -81,30 +77,28 @@ node --version >/dev/null 2>&1 || die "Node.js install failed. Run: pkg install 
 npm  --version >/dev/null 2>&1 || die "npm not found. Run: pkg install nodejs"
 
 # ── Step 3: Install Termux glibc layer ───────────────────────────────────────
-step "Step 3/5 — Checking glibc layer (needed for freebuff ELF binary)..."
+step "Step 3/5 — Checking glibc layer..."
 # The freebuff linux-arm64 binary is compiled for glibc, not Android bionic.
-# Termux ships a glibc compatibility layer that provides the required linker.
+# The Termux glibc package provides ld-linux-aarch64.so.1 needed to run it.
 if [[ -f "$GLIBC_LINKER" ]]; then
-  ok "glibc layer already installed ✓  ($GLIBC_LINKER)"
+  ok "glibc layer present ($GLIBC_LINKER)"
 else
-  info "Installing glibc layer..."
+  info "Installing Termux glibc layer..."
   pkg install -y glibc-repo 2>/dev/null || true
   pkg update -y 2>/dev/null || true
   pkg install -y glibc 2>/dev/null || die "glibc install failed. Run: pkg install glibc"
-  [[ -f "$GLIBC_LINKER" ]] || die "glibc linker still not found after install."
-  ok "glibc layer installed ✓"
+  [[ -f "$GLIBC_LINKER" ]] || die "glibc linker not found after install."
+  ok "glibc layer installed."
 fi
 
-# ── Step 4: Install freebuff npm package + download binary ───────────────────
-step "Step 4/5 — Installing freebuff via npm..."
+# ── Step 4: Install freebuff + download binary ────────────────────────────────
+step "Step 4/5 — Installing freebuff..."
 
-# Set npm global prefix inside HOME to avoid permission issues
 NPM_GLOBAL="$HOME/.npm-global"
 mkdir -p "$NPM_GLOBAL"
 npm config set prefix "$NPM_GLOBAL" 2>/dev/null || true
 export PATH="$NPM_GLOBAL/bin:$PATH"
 
-# Persist PATH in shell rc
 SHELL_RC="$HOME/.bashrc"
 [[ -f "$HOME/.zshrc" ]] && SHELL_RC="$HOME/.zshrc"
 if ! grep -q 'npm-global' "$SHELL_RC" 2>/dev/null; then
@@ -112,59 +106,55 @@ if ! grep -q 'npm-global' "$SHELL_RC" 2>/dev/null; then
   info "Added npm global bin to $SHELL_RC"
 fi
 
-# --force is required because Termux's Node.js reports os='android' but
-# freebuff's package.json only lists darwin/linux/win32.
-# The actual binary runs fine via glibc layer.
-info "npm install -g freebuff --force"
+# Termux's Node.js reports os='android'; freebuff targets linux/darwin/win32.
+# --force installs the package regardless — the linux-arm64 binary works
+# correctly on Termux via the glibc layer installed above.
 npm install -g freebuff --force 2>&1 | grep -v '^npm warn' | tail -3
 ok "npm package installed."
 
-# Download the actual linux-arm64 binary by triggering the launcher once.
-# FREEBUFF_BINARY_TARGET overrides the platform detection (android → linux-arm64).
+# Trigger the freebuff launcher once to download the linux-arm64 native binary.
+# FREEBUFF_BINARY_TARGET=linux-arm64 overrides the platform resolution so the
+# correct binary is fetched rather than an unsupported 'android-arm64' target.
 if [[ ! -f "$FREEBUFF_BINARY" ]]; then
-  info "Downloading freebuff linux-arm64 binary (~49 MB)..."
+  info "Downloading freebuff binary (~130 MB)..."
   FREEBUFF_PKG=$(npm root -g 2>/dev/null)/freebuff
   FREEBUFF_BINARY_TARGET=linux-arm64 node "$FREEBUFF_PKG/index.js" --version 2>&1 \
     | grep -Ev '^$|^Downloading' | head -5 || true
-  # Allow download to complete
   for i in $(seq 1 12); do
     [[ -f "$FREEBUFF_BINARY" ]] && break
     sleep 5
-    info "Waiting for download... (${i}/12)"
+    info "Waiting for download... ($i/12)"
   done
 fi
 
 if [[ -f "$FREEBUFF_BINARY" ]]; then
   chmod +x "$FREEBUFF_BINARY"
-  ok "Binary downloaded: $(ls -lh "$FREEBUFF_BINARY" | awk '{print $5, $NF}')"
+  ok "Binary ready: $(ls -lh "$FREEBUFF_BINARY" | awk '{print $5, $NF}')"
 else
-  die "Binary not found at $FREEBUFF_BINARY. Check internet connection and retry."
+  die "Binary not found at $FREEBUFF_BINARY. Check your internet connection and retry."
 fi
 
-# Quick smoke-test: run via glibc linker
-BIN_VER=$("$GLIBC_LINKER" --library-path "$GLIBC_LIBDIR" "$FREEBUFF_BINARY" --version 2>/dev/null || echo "ok")
-ok "Binary smoke-test passed (version: $BIN_VER)"
+FREEBUFF_VER=$("$GLIBC_LINKER" --library-path "$GLIBC_LIBDIR" "$FREEBUFF_BINARY" --version 2>/dev/null || echo "unknown")
+ok "freebuff version: $FREEBUFF_VER"
 
-# ── Step 5: Create glibc-aware launcher at $PREFIX/bin/freebuff ──────────────
+# ── Step 5: Install launcher ─────────────────────────────────────────────────
 step "Step 5/5 — Installing freebuff launcher..."
 
+# The launcher invokes the binary via the glibc linker so it runs correctly
+# under Termux's bionic environment without any manual setup.
 LAUNCHER="$PREFIX/bin/freebuff"
 cat > "$LAUNCHER" <<LAUNCH
 #!/data/data/com.termux/files/usr/bin/bash
-# freebuff — Termux launcher for freebuff AI coding agent (remonsec/freebuff-mobile)
-# Invokes the linux-arm64 glibc ELF binary via Termux's glibc layer.
+# freebuff — Termux launcher for freebuff AI coding agent
 FREEBUFF_BIN="\$HOME/.config/manicode/freebuff"
 GLIBC_LINKER="${GLIBC_LINKER}"
 GLIBC_LIBDIR="${GLIBC_LIBDIR}"
-
 if [[ ! -f "\$FREEBUFF_BIN" ]]; then
-  echo "[!] freebuff binary not found. Re-run: bash \$HOME/freebuff-mobile/install.sh"
+  echo "[!] freebuff binary not found. Run: bash \$HOME/freebuff-mobile/install.sh"
   exit 1
 fi
-
 export TERM="\${TERM:-xterm-256color}"
 export COLORTERM="\${COLORTERM:-truecolor}"
-
 exec "\$GLIBC_LINKER" --library-path "\$GLIBC_LIBDIR" "\$FREEBUFF_BIN" "\$@"
 LAUNCH
 chmod +x "$LAUNCHER"
@@ -179,7 +169,7 @@ echo ""
 echo -e " ${YEL}Launch the agent:${NC}"
 echo -e "   ${GRN}cd ~/your-project && freebuff${NC}"
 echo ""
-echo -e " ${YEL}Update freebuff:${NC}"
+echo -e " ${YEL}Update:${NC}"
 echo -e "   ${GRN}npm install -g freebuff@latest --force${NC}"
 echo ""
 echo -e " ${BLU}Docs   → https://github.com/remonsec/freebuff-mobile${NC}"
