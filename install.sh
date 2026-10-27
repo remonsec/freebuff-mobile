@@ -112,6 +112,11 @@ fi
 npm install -g freebuff --force 2>&1 | grep -v '^npm warn' | tail -3
 ok "npm package installed."
 
+# Remove the npm-global bin symlink — it points to the JS launcher (index.js)
+# which cannot execute the glibc binary correctly on Termux. The glibc-aware
+# launcher installed at $PREFIX/bin/freebuff in Step 5 replaces it.
+rm -f "$NPM_GLOBAL/bin/freebuff"
+
 # Trigger the freebuff launcher once to download the linux-arm64 native binary.
 # FREEBUFF_BINARY_TARGET=linux-arm64 overrides the platform resolution so the
 # correct binary is fetched rather than an unsupported 'android-arm64' target.
