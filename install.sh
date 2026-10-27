@@ -150,7 +150,7 @@ step "Step 5/5 — Installing freebuff launcher..."
 
 LAUNCHER="$PREFIX/bin/freebuff"
 cat > "$LAUNCHER" <<LAUNCH
-#!/usr/bin/env bash
+#!/data/data/com.termux/files/usr/bin/bash
 # freebuff — Termux launcher for freebuff AI coding agent (remonsec/freebuff-mobile)
 # Invokes the linux-arm64 glibc ELF binary via Termux's glibc layer.
 FREEBUFF_BIN="\$HOME/.config/manicode/freebuff"
