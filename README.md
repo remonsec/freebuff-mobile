@@ -88,27 +88,33 @@ freebuff                  # launch the agent
 
 ## ⚙️ How it Works
 
-Freebuff is distributed as a native Node.js CLI on npm:
+Freebuff is distributed as a Node.js npm package that downloads a native binary at first launch:
 
 ```
 install.sh
  ├─ 1. pkg update
  ├─ 2. pkg install nodejs          ← Termux arm64 Node.js (v16+)
- ├─ 3. npm config set prefix ~/.npm-global
- ├─ 4. npm install -g freebuff     ← Official npm package (linux/arm64 ✓)
- ├─ 5. PATH update in ~/.bashrc
- └─ 6. freebuff-termux wrapper     ← Sets TERM/COLORTERM for TUI rendering
+ ├─ 3. pkg install glibc           ← Termux glibc layer (linker for ELF binary)
+ ├─ 4. npm install -g freebuff --force   ← --force bypasses os='android' check
+ ├─ 5. FREEBUFF_BINARY_TARGET=linux-arm64 (downloads ~49 MB binary)
+ └─ 6. $PREFIX/bin/freebuff wrapper  ← runs binary via glibc linker
 ```
 
-### Why it works natively on Termux
+### Termux-specific issues (all handled automatically)
 
-Unlike Electron/GUI apps that need glibc + X11, Freebuff is a **pure Node.js CLI**. Termux ships Node.js compiled for `linux/arm64` using the Android NDK, which is fully compatible with npm packages targeting the same platform.
+| Issue | Root Cause | Fix Applied |
+|---|---|---|
+| `npm error notsup: Actual os: android` | Termux Node.js reports `process.platform = 'android'` not `'linux'` | `npm install --force` |
+| `cannot execute: required file not found` | freebuff binary is a **glibc ELF** (`/lib/ld-linux-aarch64.so.1`), not bionic | Run via Termux glibc linker |
+| `spawn ENOENT` on first run | Launcher tries to start binary before env is set | `FREEBUFF_BINARY_TARGET=linux-arm64` pre-downloads binary |
 
 ```
 Android ARM64 hardware
-  └─ Termux (bionic libc + Termux Node.js arm64)
-       └─ npm install -g freebuff
-            └─ freebuff CLI ← just works ✓
+  └─ Termux (bionic libc)
+       ├─ Node.js arm64  →  npm install -g freebuff --force
+       ├─ glibc layer    →  $PREFIX/glibc/lib/ld-linux-aarch64.so.1
+       └─ freebuff launcher ($PREFIX/bin/freebuff)
+              └─ exec glibc-linker ~/.config/manicode/freebuff ← linux-arm64 ELF
 ```
 
 ---
@@ -167,9 +173,10 @@ Never use print(); use logging instead.
 
 | Path | Purpose |
 |---|---|
-| `~/.npm-global/bin/freebuff` | Freebuff binary |
-| `~/.npm-global/lib/node_modules/freebuff/` | Freebuff source |
-| `$PREFIX/bin/freebuff-termux` | Termux wrapper with TUI env vars |
+| `~/.config/manicode/freebuff` | freebuff linux-arm64 ELF binary (~49 MB) |
+| `~/.npm-global/lib/node_modules/freebuff/` | npm package (launcher JS) |
+| `$PREFIX/bin/freebuff` | Termux launcher wrapper (glibc-aware) |
+| `$PREFIX/glibc/lib/ld-linux-aarch64.so.1` | glibc dynamic linker |
 | `~/.bashrc` / `~/.zshrc` | PATH update for npm global bin |
 
 ---
@@ -177,7 +184,7 @@ Never use print(); use logging instead.
 ## 🔄 Updating
 
 ```bash
-npm install -g freebuff@latest
+npm install -g freebuff@latest --force
 freebuff --version
 ```
 
@@ -187,42 +194,39 @@ freebuff --version
 
 ```bash
 npm uninstall -g freebuff
-rm $PREFIX/bin/freebuff-termux
-```
-
-Remove the PATH line from `~/.bashrc` if desired:
-
-```bash
-# Remove this line from ~/.bashrc:
-# export PATH="$HOME/.npm-global/bin:$PATH"
+rm $PREFIX/bin/freebuff
+rm -rf ~/.config/manicode/freebuff ~/.config/manicode/freebuff-metadata.json
 ```
 
 ---
 
 ## 🐛 Troubleshooting
 
-### `freebuff: command not found`
+### `npm error notsup: Actual os: android`
+
+Termux's Node.js reports `process.platform = 'android'` instead of `'linux'`.
+The install script handles this with `--force`. If running manually:
 
 ```bash
-source ~/.bashrc
-# or explicitly:
-export PATH="$HOME/.npm-global/bin:$PATH"
+npm install -g freebuff --force
+```
+
+### `cannot execute: required file not found`
+
+The freebuff binary is a **glibc ELF**, not a bionic binary. It needs Termux's glibc layer:
+
+```bash
+pkg install glibc
+# Then use the installed launcher which handles this automatically:
 freebuff
 ```
 
-### npm permission errors
+### `freebuff: command not found`
 
 ```bash
-mkdir -p ~/.npm-global
-npm config set prefix ~/.npm-global
-npm install -g freebuff
-```
-
-### Node.js too old
-
-```bash
-node --version     # need v16+
-pkg install nodejs # installs latest from Termux repo
+echo $PATH   # ensure $PREFIX/bin is in PATH
+# The launcher should be at:
+ls -la $PREFIX/bin/freebuff
 ```
 
 ### TUI rendering glitches (broken characters)
@@ -233,11 +237,9 @@ export COLORTERM=truecolor
 freebuff
 ```
 
-Or use the included wrapper: `freebuff-termux`
-
 ### Network error during AI inference
 
-Freebuff uses cloud-hosted free models. Ensure you have internet access:
+Freebuff uses cloud-hosted free models. Check connectivity:
 
 ```bash
 curl -I https://freebuff.com
@@ -249,7 +251,7 @@ curl -I https://freebuff.com
 
 | Tool | Termux Install | Root Needed | GUI Needed | Free Tier |
 |---|---|---|---|---|
-| **freebuff** | `npm install -g freebuff` | ✗ No | ✗ No | ✅ Fully free |
+| **freebuff** | `npm install --force` + glibc layer | ✗ No | ✗ No | ✅ Fully free |
 | Cursor IDE | proot + AppImage | ✗ No | ✅ Yes | ❌ Subscription |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | ✗ No | ✗ No | ❌ API cost |
 | GitHub Copilot CLI | npm | ✗ No | ✗ No | ❌ Subscription |

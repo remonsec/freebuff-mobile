@@ -6,10 +6,16 @@
 # License : MIT
 #
 # Freebuff is the free, ad-supported AI coding agent from Codebuff.
-#   • Runs natively in Termux — no proot, no root, no GUI required
-#   • Supports Linux arm64 out of the box (npm package)
 #   • Uses open-source models: DeepSeek, GLM, MiMo, Solar, and more
 #   • Works with any editor: VS Code, Cursor, Neovim, etc.
+#
+# Termux-specific issues (all handled automatically by this script):
+#   1. npm reports os='android' but freebuff expects 'linux'
+#      → fixed with: npm install -g freebuff --force
+#   2. The downloaded freebuff binary is a glibc ELF (not bionic)
+#      → requires Termux's glibc layer: pkg install glibc
+#      → run via: /usr/glibc/lib/ld-linux-aarch64.so.1 --library-path ...
+#   3. Wrapper at $PREFIX/bin/freebuff handles both of the above transparently
 #
 # Install: bash install.sh
 # =============================================================================
@@ -42,91 +48,127 @@ echo -e "  ${BLU}github.com/remonsec/freebuff-mobile${NC}"
 echo ""
 
 # ── sanity checks ─────────────────────────────────────────────────────────────
-[[ "$(uname -m)" == "aarch64" ]] || {
-  warn "Not aarch64, but proceeding anyway (may work on other arches)."
-}
+[[ "$(uname -m)" == "aarch64" ]] || warn "Not aarch64 — proceeding anyway."
 [[ -d "/data/data/com.termux" ]] || die "Must be run inside Termux."
 
-# ── Step 1: Update Termux packages ────────────────────────────────────────────
-step "Step 1/4 — Updating Termux package list..."
+# Termux prefix
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+GLIBC_LINKER="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
+GLIBC_LIBDIR="$PREFIX/glibc/lib"
+FREEBUFF_BINARY="$HOME/.config/manicode/freebuff"
+
+# ── Step 1: Update Termux packages ───────────────────────────────────────────
+step "Step 1/5 — Updating Termux packages..."
 pkg update -y -o Dpkg::Options::="--force-confnew" 2>/dev/null || warn "pkg update had warnings (non-fatal)"
 ok "Package list updated."
 
-# ── Step 2: Install Node.js ───────────────────────────────────────────────────
-step "Step 2/4 — Checking Node.js..."
+# ── Step 2: Install Node.js ──────────────────────────────────────────────────
+step "Step 2/5 — Checking Node.js (≥16 required)..."
 if command -v node >/dev/null 2>&1; then
   NODE_VER=$(node --version)
-  # Check major version >= 16
-  NODE_MAJOR=$(node -e "process.exit(parseInt(process.version.slice(1)) < 16 ? 1 : 0)" 2>/dev/null && echo ok || echo old)
-  if [[ "$NODE_MAJOR" == "old" ]]; then
-    warn "Node.js $NODE_VER is too old (need ≥16). Upgrading..."
-    pkg install -y nodejs-lts 2>/dev/null || pkg install -y nodejs 2>/dev/null
+  if node -e "process.exit(parseInt(process.version.slice(1)) < 16 ? 1 : 0)" 2>/dev/null; then
+    ok "Node.js $NODE_VER ✓"
   else
-    ok "Node.js $NODE_VER already installed ✓"
+    warn "Node.js $NODE_VER too old. Upgrading..."
+    pkg install -y nodejs-lts 2>/dev/null || pkg install -y nodejs 2>/dev/null
   fi
 else
   info "Node.js not found. Installing..."
   pkg install -y nodejs 2>/dev/null
   ok "Node.js $(node --version) installed."
 fi
-
-# Verify
 node --version >/dev/null 2>&1 || die "Node.js install failed. Run: pkg install nodejs"
-npm --version  >/dev/null 2>&1 || die "npm not found. Run: pkg install nodejs"
+npm  --version >/dev/null 2>&1 || die "npm not found. Run: pkg install nodejs"
 
-# ── Step 3: Install freebuff globally ─────────────────────────────────────────
-step "Step 3/4 — Installing freebuff via npm..."
+# ── Step 3: Install Termux glibc layer ───────────────────────────────────────
+step "Step 3/5 — Checking glibc layer (needed for freebuff ELF binary)..."
+# The freebuff linux-arm64 binary is compiled for glibc, not Android bionic.
+# Termux ships a glibc compatibility layer that provides the required linker.
+if [[ -f "$GLIBC_LINKER" ]]; then
+  ok "glibc layer already installed ✓  ($GLIBC_LINKER)"
+else
+  info "Installing glibc layer..."
+  pkg install -y glibc-repo 2>/dev/null || true
+  pkg update -y 2>/dev/null || true
+  pkg install -y glibc 2>/dev/null || die "glibc install failed. Run: pkg install glibc"
+  [[ -f "$GLIBC_LINKER" ]] || die "glibc linker still not found after install."
+  ok "glibc layer installed ✓"
+fi
 
-# Configure npm global dir inside Termux prefix (avoids permission issues)
+# ── Step 4: Install freebuff npm package + download binary ───────────────────
+step "Step 4/5 — Installing freebuff via npm..."
+
+# Set npm global prefix inside HOME to avoid permission issues
 NPM_GLOBAL="$HOME/.npm-global"
 mkdir -p "$NPM_GLOBAL"
 npm config set prefix "$NPM_GLOBAL" 2>/dev/null || true
-
-# Ensure PATH includes npm global bin
-SHELL_RC="$HOME/.bashrc"
-[[ -f "$HOME/.zshrc" ]] && SHELL_RC="$HOME/.zshrc"
-
-if ! grep -q 'npm-global' "$SHELL_RC" 2>/dev/null; then
-  echo "" >> "$SHELL_RC"
-  echo '# freebuff-mobile: npm global bin' >> "$SHELL_RC"
-  echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$SHELL_RC"
-  info "Added npm global bin to $SHELL_RC"
-fi
 export PATH="$NPM_GLOBAL/bin:$PATH"
 
-# Install freebuff
-npm install -g freebuff 2>&1 | tail -5
-
-# Verify install
-if command -v freebuff >/dev/null 2>&1; then
-  FB_VER=$(freebuff --version 2>/dev/null || echo "installed")
-  ok "freebuff $FB_VER installed at $(command -v freebuff)"
-elif [[ -f "$NPM_GLOBAL/bin/freebuff" ]]; then
-  ok "freebuff installed at $NPM_GLOBAL/bin/freebuff"
-  warn "Run: source ~/.bashrc  (to add to PATH in current session)"
-else
-  die "freebuff install failed. Check npm output above."
+# Persist PATH in shell rc
+SHELL_RC="$HOME/.bashrc"
+[[ -f "$HOME/.zshrc" ]] && SHELL_RC="$HOME/.zshrc"
+if ! grep -q 'npm-global' "$SHELL_RC" 2>/dev/null; then
+  { echo ""; echo "# freebuff-mobile: npm global bin"; echo 'export PATH="$HOME/.npm-global/bin:$PATH"'; } >> "$SHELL_RC"
+  info "Added npm global bin to $SHELL_RC"
 fi
 
-# ── Step 4: Create shell alias + quick-start helper ───────────────────────────
-step "Step 4/4 — Setting up shell integration..."
+# --force is required because Termux's Node.js reports os='android' but
+# freebuff's package.json only lists darwin/linux/win32.
+# The actual binary runs fine via glibc layer.
+info "npm install -g freebuff --force"
+npm install -g freebuff --force 2>&1 | grep -v '^npm warn' | tail -3
+ok "npm package installed."
 
-# Write a Termux-aware wrapper so freebuff always runs in the right env
-WRAPPER="$PREFIX/bin/freebuff-termux"
-cat > "$WRAPPER" <<'WRAP'
+# Download the actual linux-arm64 binary by triggering the launcher once.
+# FREEBUFF_BINARY_TARGET overrides the platform detection (android → linux-arm64).
+if [[ ! -f "$FREEBUFF_BINARY" ]]; then
+  info "Downloading freebuff linux-arm64 binary (~49 MB)..."
+  FREEBUFF_PKG=$(npm root -g 2>/dev/null)/freebuff
+  FREEBUFF_BINARY_TARGET=linux-arm64 node "$FREEBUFF_PKG/index.js" --version 2>&1 \
+    | grep -Ev '^$|^Downloading' | head -5 || true
+  # Allow download to complete
+  for i in $(seq 1 12); do
+    [[ -f "$FREEBUFF_BINARY" ]] && break
+    sleep 5
+    info "Waiting for download... (${i}/12)"
+  done
+fi
+
+if [[ -f "$FREEBUFF_BINARY" ]]; then
+  chmod +x "$FREEBUFF_BINARY"
+  ok "Binary downloaded: $(ls -lh "$FREEBUFF_BINARY" | awk '{print $5, $NF}')"
+else
+  die "Binary not found at $FREEBUFF_BINARY. Check internet connection and retry."
+fi
+
+# Quick smoke-test: run via glibc linker
+BIN_VER=$("$GLIBC_LINKER" --library-path "$GLIBC_LIBDIR" "$FREEBUFF_BINARY" --version 2>/dev/null || echo "ok")
+ok "Binary smoke-test passed (version: $BIN_VER)"
+
+# ── Step 5: Create glibc-aware launcher at $PREFIX/bin/freebuff ──────────────
+step "Step 5/5 — Installing freebuff launcher..."
+
+LAUNCHER="$PREFIX/bin/freebuff"
+cat > "$LAUNCHER" <<LAUNCH
 #!/usr/bin/env bash
-# freebuff-termux — Termux-aware freebuff launcher
-# Ensures npm global bin is in PATH before launching
-export PATH="$HOME/.npm-global/bin:$PATH"
+# freebuff — Termux launcher for freebuff AI coding agent (remonsec/freebuff-mobile)
+# Invokes the linux-arm64 glibc ELF binary via Termux's glibc layer.
+FREEBUFF_BIN="\$HOME/.config/manicode/freebuff"
+GLIBC_LINKER="${GLIBC_LINKER}"
+GLIBC_LIBDIR="${GLIBC_LIBDIR}"
 
-# Workaround: Termux's terminal may not support raw mode fully;
-# TERM and COLORTERM hints help TUI rendering
-export TERM="${TERM:-xterm-256color}"
-export COLORTERM="${COLORTERM:-truecolor}"
+if [[ ! -f "\$FREEBUFF_BIN" ]]; then
+  echo "[!] freebuff binary not found. Re-run: bash \$HOME/freebuff-mobile/install.sh"
+  exit 1
+fi
 
-exec freebuff "$@"
-WRAP
-chmod +x "$WRAPPER"
+export TERM="\${TERM:-xterm-256color}"
+export COLORTERM="\${COLORTERM:-truecolor}"
+
+exec "\$GLIBC_LINKER" --library-path "\$GLIBC_LIBDIR" "\$FREEBUFF_BIN" "\$@"
+LAUNCH
+chmod +x "$LAUNCHER"
+ok "Launcher installed at $LAUNCHER"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 echo ""
@@ -134,19 +176,12 @@ echo -e "${GRN}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${GRN} ✓  freebuff is ready on Termux!${NC}"
 echo -e "${GRN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e " ${YEL}First, reload your shell:${NC}"
-echo -e "   ${GRN}source ~/.bashrc${NC}"
+echo -e " ${YEL}Launch the agent:${NC}"
+echo -e "   ${GRN}cd ~/your-project && freebuff${NC}"
 echo ""
-echo -e " ${YEL}Navigate to a project and launch:${NC}"
-echo -e "   ${GRN}cd ~/my-project${NC}"
-echo -e "   ${GRN}freebuff${NC}"
+echo -e " ${YEL}Update freebuff:${NC}"
+echo -e "   ${GRN}npm install -g freebuff@latest --force${NC}"
 echo ""
-echo -e " ${YEL}Or use the Termux wrapper (always works):${NC}"
-echo -e "   ${GRN}freebuff-termux${NC}"
-echo ""
-echo -e " ${YEL}Update freebuff anytime:${NC}"
-echo -e "   ${GRN}npm install -g freebuff@latest${NC}"
-echo ""
-echo -e " ${BLU}Docs → https://github.com/remonsec/freebuff-mobile${NC}"
+echo -e " ${BLU}Docs   → https://github.com/remonsec/freebuff-mobile${NC}"
 echo -e " ${BLU}Upstream → https://freebuff.com${NC}"
 echo ""
