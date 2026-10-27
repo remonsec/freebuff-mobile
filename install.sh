@@ -52,6 +52,11 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 GLIBC_LINKER="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
 GLIBC_LIBDIR="$PREFIX/glibc/lib"
 FREEBUFF_BINARY="$HOME/.config/manicode/freebuff"
+# Shadow lib dir: contains a real libc.so symlink → libc.so.6 (ELF).
+# The glibc package ships libc.so as a GNU ld linker script, which the
+# runtime dynamic linker cannot process. Any dlopen("libc.so") call inside
+# the freebuff binary will find the ELF symlink here instead of the script.
+FREEBUFF_LIBS="$HOME/.freebuff-libs"
 
 # ── Step 1: Update Termux packages ───────────────────────────────────────────
 step "Step 1/5 — Updating Termux packages..."
@@ -139,19 +144,27 @@ else
   die "Binary not found at $FREEBUFF_BINARY. Check your internet connection and retry."
 fi
 
-FREEBUFF_VER=$("$GLIBC_LINKER" --library-path "$GLIBC_LIBDIR" "$FREEBUFF_BINARY" --version 2>/dev/null || echo "unknown")
+FREEBUFF_VER=$("$GLIBC_LINKER" --library-path "$FREEBUFF_LIBS:$GLIBC_LIBDIR" "$FREEBUFF_BINARY" --version 2>/dev/null || echo "unknown")
 ok "freebuff version: $FREEBUFF_VER"
 
 # ── Step 5: Install launcher ─────────────────────────────────────────────────
 step "Step 5/5 — Installing freebuff launcher..."
 
-# The launcher invokes the binary via the glibc linker so it runs correctly
-# under Termux's bionic environment without any manual setup.
+# Create shadow lib dir with a real libc.so → libc.so.6 symlink.
+# The glibc package's libc.so is a GNU ld linker script (text), not an ELF.
+# The runtime dynamic linker rejects it when freebuff calls dlopen("libc.so").
+# Placing an ELF symlink in this directory ahead of the system glibc path
+# ensures dlopen finds the real shared library instead of the script.
+mkdir -p "$FREEBUFF_LIBS"
+ln -sf "$GLIBC_LIBDIR/libc.so.6" "$FREEBUFF_LIBS/libc.so"
+ok "libc.so shadow symlink → libc.so.6"
+
 LAUNCHER="$PREFIX/bin/freebuff"
 cat > "$LAUNCHER" <<LAUNCH
 #!/data/data/com.termux/files/usr/bin/bash
 # freebuff — Termux launcher for freebuff AI coding agent
 FREEBUFF_BIN="\$HOME/.config/manicode/freebuff"
+FREEBUFF_LIBS="\$HOME/.freebuff-libs"
 GLIBC_LINKER="${GLIBC_LINKER}"
 GLIBC_LIBDIR="${GLIBC_LIBDIR}"
 if [[ ! -f "\$FREEBUFF_BIN" ]]; then
@@ -160,7 +173,7 @@ if [[ ! -f "\$FREEBUFF_BIN" ]]; then
 fi
 export TERM="\${TERM:-xterm-256color}"
 export COLORTERM="\${COLORTERM:-truecolor}"
-exec "\$GLIBC_LINKER" --library-path "\$GLIBC_LIBDIR" "\$FREEBUFF_BIN" "\$@"
+exec "\$GLIBC_LINKER" --library-path "\$FREEBUFF_LIBS:\$GLIBC_LIBDIR" "\$FREEBUFF_BIN" "\$@"
 LAUNCH
 chmod +x "$LAUNCHER"
 ok "Launcher installed at $LAUNCHER"
